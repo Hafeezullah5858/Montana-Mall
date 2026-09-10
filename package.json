@@ -1,0 +1,16 @@
+{
+  "name": "muntaha-mall",
+  "version": "4.0.0",
+  "private": true,
+  "description": "Muntaha Mall full-stack marketplace starter",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@sfpy/node-core": "0.3.5",
+    "axios": "^1.8.4"
+  }
+}
