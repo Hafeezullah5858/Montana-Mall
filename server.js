@@ -145,12 +145,13 @@ function loadDB(){
     try {
       const existing = JSON.parse(fs.readFileSync(DB_FILE,'utf8'));
       existing.users ||= []; existing.products ||= []; existing.orders ||= []; existing.wishlists ||= {};
+      existing.settings ||= {storeName:'Muntaha Mall',tagline:'Shop More • Live Better',announcement:'Proudly serving customers across Pakistan',supportEmail:'',supportPhone:'',logoUrl:'/assets/muntaha-mall-logo.png',heroTitle:'Shop smarter. Live better.',heroText:'Discover thousands of products from trusted sellers, compare prices, pay securely and track every order — all in one place.'};
       return existing;
     } catch (e) { console.error('DB read failed, rebuilding:', e.message); }
   }
   const salt=crypto.randomBytes(16).toString('hex');
   const adminHash=`${salt}:${crypto.scryptSync(process.env.ADMIN_PASSWORD || 'Admin@12345',salt,64).toString('hex')}`;
-  const fresh={users:[{id:'u_admin',name:'Muntaha Admin',email:(process.env.ADMIN_EMAIL||'admin@muntahamall.local').toLowerCase(),role:'admin',passwordHash:adminHash}],products:seedProducts,orders:[],wishlists:{}};
+  const fresh={users:[{id:'u_admin',name:'Muntaha Admin',email:(process.env.ADMIN_EMAIL||'admin@muntahamall.local').toLowerCase(),role:'admin',passwordHash:adminHash}],products:seedProducts,orders:[],wishlists:{},settings:{storeName:'Muntaha Mall',tagline:'Shop More • Live Better',announcement:'Proudly serving customers across Pakistan',supportEmail:'',supportPhone:'',logoUrl:'/assets/muntaha-mall-logo.png',heroTitle:'Shop smarter. Live better.',heroText:'Discover thousands of products from trusted sellers, compare prices, pay securely and track every order — all in one place.'}};
   fs.writeFileSync(DB_FILE,JSON.stringify(fresh,null,2));
   return fresh;
 }
@@ -250,6 +251,7 @@ async function api(req,res){
   try{
     if(method==='GET'&&p==='/api/health')return json(res,200,{ok:true,payment:{provider:PAYMENT_PROVIDER,configured:paymentConfigured(),environment:SAFEPAY_ENV}});
     if(method==='GET'&&p==='/api/products')return json(res,200,{products:db.products.map(cleanProduct)});
+    if(method==='GET'&&p==='/api/store/settings')return json(res,200,{settings:db.settings||{}});
     if(method==='GET'&&p==='/api/auth/me')return json(res,200,{user:user?safeUser(user):null});
     if(method==='POST'&&p==='/api/auth/register'){
       const b=await body(req),email=String(b.email||'').trim().toLowerCase(),name=String(b.name||'').trim(),password=String(b.password||'');
@@ -316,6 +318,28 @@ async function api(req,res){
       for(const [token,s] of sessions){if(s.userId===user.id)sessions.delete(token);}
       const token=crypto.randomBytes(32).toString('hex');sessions.set(token,{userId:user.id,expires:Date.now()+SESSION_TTL});setCookie(res,token);
       return json(res,200,{ok:true});
+    }
+    if(method==='POST'&&p==='/api/admin/users'){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const b=await body(req),name=String(b.name||'').trim(),email=String(b.email||'').trim().toLowerCase(),password=String(b.password||''),role=String(b.role||'customer');
+      if(name.length<2||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<8||!['customer','seller','admin'].includes(role))return json(res,400,{error:'Enter a valid name, email, role and password (8+ characters).'});
+      if(db.users.some(u=>u.email===email))return json(res,409,{error:'An account with this email already exists.'});
+      const u={id:uid('u'),name,email,role,passwordHash:await hashPassword(password)};db.users.push(u);persist();return json(res,201,{user:safeUser(u)});
+    }
+    if(method==='GET'&&p==='/api/admin/settings'){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});return json(res,200,{settings:db.settings||{}});
+    }
+    if(method==='PATCH'&&p==='/api/admin/settings'){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const b=await body(req),s=db.settings||{};const fields=['storeName','tagline','announcement','supportEmail','supportPhone','logoUrl','heroTitle','heroText'];
+      for(const k of fields)if(b[k]!==undefined)s[k]=String(b[k]).trim().slice(0,1000);
+      if(s.logoUrl&&!s.logoUrl.startsWith('/'))s.logoUrl=safeUrl(s.logoUrl);
+      db.settings=s;persist();return json(res,200,{settings:s});
+    }
+    if(method==='GET'&&p==='/api/admin/export'){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const payload={exportedAt:new Date().toISOString(),users:db.users.map(safeUser),products:db.products.map(cleanProduct),orders:db.orders.map(sanitizeOrderForClient),settings:db.settings||{}};
+      return json(res,200,payload,{'Content-Disposition':'attachment; filename="muntaha-mall-backup.json"'});
     }
     if(method==='POST'&&/^\/api\/admin\/users\/[^/]+\/reset-password$/.test(p)){
       if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
