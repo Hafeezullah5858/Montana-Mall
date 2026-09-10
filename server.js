@@ -231,7 +231,7 @@ async function getOnlinePaymentStatus(tracker){
   try{return await getSafepayClient().reporter.payments.fetch(tracker);}
   catch(e){console.error('Payment status check:',e.message);return null;}
 }
-function markPayment(order,status,reference=''){if(!order)return false;const next=String(status||'').toLowerCase();if(next==='paid'||next==='completed'||next==='succeeded'||next==='tracker_ended'||next==='payment.succeeded'){order.paymentStatus='Paid';order.paymentReference=reference||order.paymentReference||'';if(order.status==='Pending')order.status='Processing';return true;}if(next==='failed'||next==='cancelled'||next==='canceled'){if(order.paymentStatus!=='Paid'){if(order.paymentStatus!=='Cancelled')restockOrder(order);order.paymentStatus=next==='failed'?'Failed':'Cancelled';order.status='Cancelled';return true;}}return false;}
+function markPayment(order,status,reference=''){if(!order)return false;const next=String(status||'').toLowerCase();if(next==='paid'||next==='completed'||next==='succeeded'){order.paymentStatus='Paid';order.paymentReference=reference||order.paymentReference||'';if(order.status==='Pending')order.status='Processing';return true;}if(next==='failed'||next==='cancelled'||next==='canceled'){if(order.paymentStatus!=='Paid'){if(order.paymentStatus!=='Cancelled')restockOrder(order);order.paymentStatus=next==='failed'?'Failed':'Cancelled';order.status='Cancelled';return true;}}return false;}
 function restockOrder(order){if(order._restocked)return;for(const item of order.items||[]){const prod=db.products.find(x=>String(x.id)===String(item.id));if(prod)prod.stock+=Number(item.qty)||0;}order._restocked=true;}
 function expirePendingPayments(){let changed=false;const cutoff=Date.now()-ONLINE_PAYMENT_TTL;for(const o of db.orders){if(o.payment==='online'&&o.paymentStatus==='Pending'&&new Date(o.date).getTime()<cutoff){restockOrder(o);o.paymentStatus='Cancelled';o.status='Cancelled';changed=true;}}if(changed)persist();}
 function sanitizeOrderForClient(o){const x={...o};delete x._restocked;delete x.tracker;return x;}
@@ -243,7 +243,7 @@ function verifySafepayWebhook(raw,sig,timestamp){if(!SAFEPAY_WEBHOOK_SECRET||!si
   candidates.push(crypto.createHmac('sha256',key).update(raw).digest('hex'));
   return candidates.some(expected=>expected.length===sig.length&&crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(sig)));
 }
-function findOrderFromWebhook(data){const root=data?.data||data;const n=root?.notification||root?.data||{};const metadata=n?.metadata||root?.metadata||{};const id=metadata.order_id||metadata.orderId||metadata.order||root?.order_id||root?.orderId;let order=id?db.orders.find(o=>String(o.id)===String(id)):null;if(!order){const rawTracker=n?.tracker||root?.tracker||root?.token||data?.tracker;const tracker=typeof rawTracker==='string'?rawTracker:(rawTracker?.token||rawTracker?.id||'');order=db.orders.find(o=>o.tracker===tracker);}return {order,notification:n,root};}
+function findOrderFromWebhook(data){const root=data?.data||data;const n=root?.notification||root?.data||{};const metadata=n?.metadata||root?.metadata||{};const id=metadata.order_id||metadata.orderId||metadata.order||root?.order_id||root?.orderId;let order=id?db.orders.find(o=>String(o.id)===String(id)):null;if(!order){const tracker=n?.tracker||root?.tracker||root?.token||data?.tracker;order=db.orders.find(o=>o.tracker===tracker);}return {order,notification:n,root};}
 
 async function api(req,res){
   const url=new URL(req.url,'http://localhost');const p=url.pathname;const method=req.method;const user=sessionUser(req);expirePendingPayments();
@@ -288,10 +288,10 @@ async function api(req,res){
     }
 
     if(method==='POST'&&p==='/api/orders'){
-      if(!user)return json(res,401,{error:'Login required'});const b=await body(req),items=Array.isArray(b.items)?b.items:[];if(!items.length)return json(res,400,{error:'Cart is empty.'});
-      const name=String(b.name||user.name).trim(),phone=String(b.phone||'').trim(),address=String(b.address||'').trim(),payment=b.payment==='online'?'online':'cod';if(!name||!/^03[0-9]{2}[- ]?[0-9]{7}$/.test(phone))return json(res,400,{error:'Enter a valid Pakistan mobile number (03XX XXXXXXX).'});if(address.length<8)return json(res,400,{error:'Please enter a complete delivery address.'});
+      const b=await body(req),items=Array.isArray(b.items)?b.items:[];if(!items.length)return json(res,400,{error:'Cart is empty.'});
+      const name=String(b.name||user?.name||'').trim(),phone=String(b.phone||'').trim(),address=String(b.address||'').trim(),payment=b.payment==='online'?'online':'cod';if(!name||!/^03[0-9]{2}[- ]?[0-9]{7}$/.test(phone))return json(res,400,{error:'Enter a valid Pakistan mobile number (03XX XXXXXXX).'});if(address.length<8)return json(res,400,{error:'Please enter a complete delivery address.'});
       const final=[];for(const i of items){const prod=db.products.find(x=>String(x.id)===String(i.id));const qty=Math.max(1,Math.min(99,Number(i.qty)||1));if(!prod||prod.stock<qty)return json(res,400,{error:`${prod?.name||'A product'} is out of stock or unavailable.`});final.push({id:prod.id,name:prod.name,price:Number(prod.price),qty,seller:prod.seller,icon:prod.icon||'🛍️'});}
-      const total=final.reduce((s,i)=>s+i.price*i.qty,0);const o={id:orderId(),date:new Date().toISOString(),customer:user.email,name,phone,address,payment,items:final,total,status:'Pending',paymentStatus:payment==='online'?'Pending':'Not Required'};
+      const total=final.reduce((s,i)=>s+i.price*i.qty,0);const id=orderId();const o={id,date:new Date().toISOString(),customer:user?.email||null,guest:!user,name,phone,address,payment,items:final,total,status:'Pending',paymentStatus:payment==='online'?'Pending':'Not Required'};
       if(payment==='online'){
         try { const pay=await createOnlinePayment(o,getOrigin(req)); o.tracker=pay.tracker; final.forEach(i=>{const prod=db.products.find(x=>x.id===i.id);prod.stock-=i.qty;}); db.orders.unshift(o);persist();return json(res,201,{online:true,checkoutUrl:pay.checkoutUrl,order:sanitizeOrderForClient(o)}); }
         catch(e){return json(res,e.status||502,{error:e.message||'Unable to start online payment.'});}
@@ -301,12 +301,50 @@ async function api(req,res){
     if(method==='GET'&&p==='/api/orders'){if(!user)return json(res,401,{error:'Login required'});const mine=user.role==='admin'?db.orders:db.orders.filter(o=>o.customer===user.email);return json(res,200,{orders:mine.map(sanitizeOrderForClient)});}
 
     if(method==='GET'&&p==='/api/payments/status'){
-      if(!user)return json(res,401,{error:'Login required'});const orderIdParam=url.searchParams.get('orderId')||'',tracker=url.searchParams.get('tracker')||'';const o=db.orders.find(x=>x.id===orderIdParam&& (user.role==='admin'||x.customer===user.email));if(!o)return json(res,404,{error:'Order not found.'});if(o.payment!=='online')return json(res,200,{order:sanitizeOrderForClient(o)});if(tracker&&o.tracker&&tracker!==o.tracker)return json(res,400,{error:'Invalid payment tracker.'});const remote=await getOnlinePaymentStatus(o.tracker);if(remote){const n=remote?.data?.notification||remote?.data||remote?.notification||remote;const trackerInfo=remote?.data?.tracker||remote?.tracker||{};const state=String(n?.state||n?.status||trackerInfo?.state||remote?.state||'').toLowerCase();const success=n?.success===true||remote?.success===true;const reference=String(n?.reference||n?.payment_reference||remote?.reference||'');if(markPayment(o,success?'succeeded':state,reference))persist();}return json(res,200,{order:sanitizeOrderForClient(o),configured:paymentConfigured()});
+      if(!user)return json(res,401,{error:'Login required'});const orderIdParam=url.searchParams.get('orderId')||'',tracker=url.searchParams.get('tracker')||'';const o=db.orders.find(x=>x.id===orderIdParam&& (user.role==='admin'||x.customer===user.email));if(!o)return json(res,404,{error:'Order not found.'});if(o.payment!=='online')return json(res,200,{order:sanitizeOrderForClient(o)});if(tracker&&o.tracker&&tracker!==o.tracker)return json(res,400,{error:'Invalid payment tracker.'});const remote=await getOnlinePaymentStatus(o.tracker);if(remote){const n=remote?.data?.notification||remote?.data||remote?.notification||remote;const state=String(n?.state||n?.status||remote?.state||'').toLowerCase();const reference=String(n?.reference||n?.payment_reference||'');if(markPayment(o,state,reference))persist();}return json(res,200,{order:sanitizeOrderForClient(o),configured:paymentConfigured()});
     }
     if(method==='POST'&&p==='/api/payments/safepay/webhook'){
-      const raw=await rawBody(req);const sig=req.headers['x-sfpy-signature']||'';const ts=req.headers['x-sfpy-timestamp']||'';if(!verifySafepayWebhook(raw,String(sig),String(ts)))return json(res,401,{error:'Invalid webhook signature.'});let data;try{data=JSON.parse(raw.toString('utf8'));}catch{return json(res,400,{error:'Invalid webhook JSON.'});}const {order,notification,root}=findOrderFromWebhook(data);if(order){const state=String(notification?.state||notification?.status||root?.state||root?.status||root?.type||data?.type||'').toLowerCase();const success=notification?.success===true||root?.success===true||data?.success===true||state==='payment.succeeded';const reference=String(notification?.reference||root?.reference||data?.reference||'');if(markPayment(order,success?'succeeded':state,reference))persist();}return json(res,200,{ok:true});
+      const raw=await rawBody(req);const sig=req.headers['x-sfpy-signature']||'';const ts=req.headers['x-sfpy-timestamp']||'';if(!verifySafepayWebhook(raw,String(sig),String(ts)))return json(res,401,{error:'Invalid webhook signature.'});let data;try{data=JSON.parse(raw.toString('utf8'));}catch{return json(res,400,{error:'Invalid webhook JSON.'});}const {order,notification,root}=findOrderFromWebhook(data);if(order){const state=String(notification?.state||notification?.status||root?.state||root?.status||root?.type||'').toLowerCase();const reference=String(notification?.reference||root?.reference||'');if(markPayment(order,state,reference))persist();}return json(res,200,{ok:true});
     }
 
+    if(method==='POST'&&p==='/api/admin/password'){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const b=await body(req),current=String(b.currentPassword||''),next=String(b.newPassword||'');
+      if(next.length<8)return json(res,400,{error:'New password must be at least 8 characters.'});
+      if(!(await verifyPassword(current,user.passwordHash)))return json(res,401,{error:'Current password is incorrect.'});
+      user.passwordHash=await hashPassword(next); persist();
+      for(const [token,s] of sessions){if(s.userId===user.id)sessions.delete(token);}
+      const token=crypto.randomBytes(32).toString('hex');sessions.set(token,{userId:user.id,expires:Date.now()+SESSION_TTL});setCookie(res,token);
+      return json(res,200,{ok:true});
+    }
+    if(method==='POST'&&/^\/api\/admin\/users\/[^/]+\/reset-password$/.test(p)){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const id=decodeURIComponent(p.split('/')[4]),target=db.users.find(x=>String(x.id)===id);if(!target)return json(res,404,{error:'User not found.'});
+      const b=await body(req),next=String(b.newPassword||'');if(next.length<8)return json(res,400,{error:'Password must be at least 8 characters.'});
+      target.passwordHash=await hashPassword(next);persist();
+      for(const [token,s] of sessions){if(s.userId===target.id)sessions.delete(token);}
+      return json(res,200,{ok:true});
+    }
+    if(method==='PATCH'&&/^\/api\/admin\/users\/[^/]+$/.test(p)){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const id=decodeURIComponent(p.split('/').pop()),target=db.users.find(x=>String(x.id)===id);if(!target)return json(res,404,{error:'User not found.'});
+      const b=await body(req);if(b.role!==undefined&&!['customer','seller','admin'].includes(String(b.role)))return json(res,400,{error:'Invalid role.'});
+      if(target.id===user.id&&b.role&&b.role!=='admin')return json(res,400,{error:'You cannot remove your own admin access.'});
+      if(b.role)target.role=String(b.role);if(b.name!==undefined){const n=String(b.name).trim();if(n.length<2)return json(res,400,{error:'Name is required.'});target.name=n;}
+      persist();return json(res,200,{user:safeUser(target)});
+    }
+    if(method==='POST'&&p==='/api/admin/offers'){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const b=await body(req),id=String(b.productId||''),percent=Number(b.percent),prod=db.products.find(x=>String(x.id)===id);
+      if(!prod)return json(res,404,{error:'Product not found.'});if(!Number.isInteger(percent)||percent<1||percent>90)return json(res,400,{error:'Discount must be 1 to 90 percent.'});
+      const regular=Number(prod.old)>Number(prod.price)?Number(prod.old):Number(prod.price);prod.old=regular;prod.price=Math.max(1,Math.round(regular*(1-percent/100)));prod.badge=String(b.badge||`${percent}% OFF`).slice(0,30);persist();return json(res,200,{product:cleanProduct(prod)});
+    }
+    if(method==='DELETE'&&/^\/api\/admin\/offers\/[^/]+$/.test(p)){
+      if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});
+      const id=decodeURIComponent(p.split('/').pop()),prod=db.products.find(x=>String(x.id)===id);if(!prod)return json(res,404,{error:'Product not found.'});
+      if(Number(prod.old)>Number(prod.price)){prod.price=Number(prod.old);prod.old=null;prod.badge='';persist();}
+      return json(res,200,{ok:true,product:cleanProduct(prod)});
+    }
     if(method==='GET'&&p==='/api/admin/dashboard'){
       if(!user||user.role!=='admin')return json(res,403,{error:'Admin access is restricted.'});const activeOrders=db.orders.filter(o=>o.status!=='Cancelled');const total=activeOrders.reduce((s,o)=>s+Number(o.total||0),0);return json(res,200,{users:db.users.map(safeUser),products:db.products.map(cleanProduct),orders:db.orders.map(sanitizeOrderForClient),gmv:total,payment:{provider:PAYMENT_PROVIDER,configured:paymentConfigured(),environment:SAFEPAY_ENV}});
     }
